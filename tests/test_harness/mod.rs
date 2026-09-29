@@ -68,7 +68,6 @@ impl TestHarness {
             let mut engine = Engine::new(
                 dongle.transport(),
                 event_tx.clone(),
-                None,
             );
             let exit_tx = engine.start();
 

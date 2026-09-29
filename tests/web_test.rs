@@ -44,7 +44,7 @@ async fn test_web_endpoints_integration() {
 
     // 2. Initialize engine and handshake
     let (event_tx, mut _event_rx) = mpsc::channel::<DongleEvent>(32);
-    let mut engine = Engine::new(GatewayTransport::Replay(replay_transport.clone()), event_tx, None);
+    let mut engine = Engine::new(GatewayTransport::Replay(replay_transport.clone()), event_tx);
     let _exit_tx = engine.start();
     engine.initialize_handshake().await.unwrap();
 
