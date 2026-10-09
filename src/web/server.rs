@@ -176,6 +176,10 @@ async fn handle_bridge_connection(
     engine.device_path = device_path;
     engine.remote_addr = Some(remote_addr.clone());
     let exit_tx = engine.start();
+    // This connection's own disconnect signal. The engines map is keyed by
+    // dongle MAC, so after the bridge reconnects the map entry belongs to the
+    // newer connection; cleanup below must not touch it.
+    let my_disconnect = Arc::clone(&engine.disconnect_notify);
 
     // Run handshake with timeout
     let mac = match tokio::time::timeout(
@@ -208,7 +212,9 @@ async fn handle_bridge_connection(
 
             // Register in engines map and keep exit handle alive
             let mut map = state.engines.lock().await;
-            map.insert(mac.clone(), engine);
+            if map.insert(mac.clone(), engine).is_some() {
+                info!("Bridge dongle {} reconnected from {}; replacing the previous session", mac, remote_addr);
+            }
             drop(map);
             state.engine_exit_handles.lock().await.push(exit_tx);
             mac
@@ -227,23 +233,23 @@ async fn handle_bridge_connection(
 
     // Wait for the engine's transport to die (WebSocket close / broken pipe).
     // The reader loop fires disconnect_notify when the transport errors out.
-    {
-        let engines = state.engines.lock().await;
-        let notify = if let Some(eng) = engines.get(&mac) {
-            Arc::clone(&eng.disconnect_notify)
-        } else {
-            // Engine already gone — nothing to wait for
-            return;
-        };
-        drop(engines);
-        notify.notified().await;
-        info!("Bridge dongle {} disconnected, cleaning up", mac);
-    }
+    my_disconnect.notified().await;
 
-    // Remove engine from the shared map
+    // Remove the engine only if it is still this connection's. A stale
+    // session (e.g. the bridge rebuilt its WebSocket and the old TCP
+    // connection reset later) must not unregister the live one; that left
+    // the dongle "not connected" until the gateway was restarted.
     {
         let mut map = state.engines.lock().await;
+        let ours = map
+            .get(&mac)
+            .is_some_and(|eng| Arc::ptr_eq(&eng.disconnect_notify, &my_disconnect));
+        if !ours {
+            info!("Stale bridge session for dongle {} from {} closed; newer session stays active", mac, remote_addr);
+            return;
+        }
         map.remove(&mac);
+        info!("Bridge dongle {} disconnected, cleaning up", mac);
     }
 
     // Cleanup: unassign sensors from disconnected dongle
